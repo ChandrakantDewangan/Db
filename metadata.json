@@ -1,5 +1,5 @@
 {
-  "name": "InsightStream Analytics Chat",
-  "description": "A collaborative AI chatbot with a dedicated workspace for deep data analysis and custom visualizations.",
+  "name": "InsightStream Analytics",
+  "description": "A dedicated advanced analytics workspace for data manipulation and custom visualizations with pre-loaded datasets.",
   "requestFramePermissions": []
 }
