@@ -5,6 +5,7 @@ export interface Column {
   name: string;
   type: DataType;
   visible: boolean;
+  formula?: string;
 }
 
 export interface Dataset {

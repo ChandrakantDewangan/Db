@@ -6,7 +6,8 @@ import {
 import { 
   LayoutDashboard, Table as TableIcon, BarChart3, Settings2, Filter, 
   ChevronDown, ChevronUp, Trash2, Edit3, Download, Plus, GitMerge,
-  GripVertical, Type as TypeIcon, Hash, Calendar, CheckCircle2, Search
+  GripVertical, Type as TypeIcon, Hash, Calendar, CheckCircle2, Search,
+  Calculator, AlertCircle
 } from 'lucide-react';
 
 import { AgGridReact } from 'ag-grid-react';
@@ -50,7 +51,7 @@ interface AnalyticsViewProps {
 
 export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDataset }: AnalyticsViewProps) {
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'data' | 'visualize' | 'joins'>('data');
+  const [activeTab, setActiveTab] = useState<'data' | 'visualize' | 'joins' | 'schema'>('data');
   const [visualizations, setVisualizations] = useState<Visualization[]>([]);
   const [joins, setJoins] = useState<Join[]>([]);
   const gridRef = useRef<AgGridReact>(null);
@@ -77,21 +78,71 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
 
   // Compute joined data if a join is selected
   const sourceData = useMemo(() => {
-    if (selectedDataset) return selectedDataset.data;
-    if (selectedJoin) {
+    let baseData: any[] = [];
+    let currentColumns: Column[] = [];
+
+    if (selectedDataset) {
+      baseData = selectedDataset.data;
+      currentColumns = selectedDataset.columns;
+    } else if (selectedJoin) {
       const leftDs = datasets.find(d => d.id === selectedJoin.leftDatasetId);
       const rightDs = datasets.find(d => d.id === selectedJoin.rightDatasetId);
-      if (!leftDs || !rightDs) return [];
+      if (leftDs && rightDs) {
+        baseData = leftDs.data.map(leftRow => {
+          const match = rightDs.data.find(rightRow => 
+            String(leftRow[selectedJoin.leftColumn]) === String(rightRow[selectedJoin.rightColumn])
+          );
+          if (selectedJoin.type === 'inner' && !match) return null;
+          
+          // Prefix right columns to avoid collisions
+          const prefixedRight = Object.keys(match || {}).reduce((acc, key) => {
+            acc[`joined_${key}`] = (match as any)[key];
+            return acc;
+          }, {} as any);
 
-      return leftDs.data.map(leftRow => {
-        const match = rightDs.data.find(rightRow => 
-          String(leftRow[selectedJoin.leftColumn]) === String(rightRow[selectedJoin.rightColumn])
-        );
-        if (selectedJoin.type === 'inner' && !match) return null;
-        return { ...leftRow, ...match };
-      }).filter(Boolean);
+          return { ...leftRow, ...prefixedRight };
+        }).filter(Boolean);
+
+        // Construct virtual columns for join
+        currentColumns = [...leftDs.columns];
+        rightDs.columns.forEach(col => {
+          if (!currentColumns.find(c => c.key === col.key)) {
+            currentColumns.push({ ...col, key: `joined_${col.key}` });
+          }
+        });
+      }
     }
-    return [];
+
+    // Apply formulas
+    const colsWithFormulas = currentColumns.filter(c => c.formula);
+    if (colsWithFormulas.length === 0) return baseData;
+
+    return baseData.map(row => {
+      const newRow = { ...row };
+      colsWithFormulas.forEach(col => {
+        try {
+          let formula = col.formula || '';
+          const colMap = currentColumns.reduce((acc, c) => {
+            acc[c.name] = row[c.key];
+            return acc;
+          }, {} as Record<string, any>);
+
+          Object.keys(colMap).forEach(name => {
+            const val = colMap[name];
+            const escapedName = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+            const regex = new RegExp(`\\[${escapedName}\\]`, 'g');
+            formula = formula.replace(regex, typeof val === 'string' ? `"${val}"` : val);
+          });
+
+          // eslint-disable-next-line no-new-func
+          const result = new Function(`return ${formula}`)();
+          newRow[col.key] = result;
+        } catch (e) {
+          newRow[col.key] = '#ERROR!';
+        }
+      });
+      return newRow;
+    });
   }, [selectedDataset, selectedJoin, datasets]);
 
   const sourceColumns = useMemo(() => {
@@ -119,7 +170,7 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
       headerName: col.name,
       sortable: true,
       filter: true,
-      editable: !!selectedDataset, // Only allow editing base datasets, not joins for now
+      editable: !!selectedDataset && !col.formula, // Only allow editing base columns, not formulas
       resizable: true,
       flex: 1,
       minWidth: 120,
@@ -153,11 +204,35 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
   }, [selectedDataset, onUpdateDataset]);
 
   const handleTypeChange = (colKey: string, newType: DataType) => {
+    const convertValue = (val: any, type: DataType) => {
+      if (val === null || val === undefined || val === '') return val;
+      if (type === 'number') {
+        const num = Number(val);
+        return isNaN(num) ? 0 : num;
+      }
+      if (type === 'boolean') {
+        return String(val).toLowerCase() === 'true' || val === 1 || val === true;
+      }
+      if (type === 'date') {
+        try {
+          const d = new Date(val);
+          return isNaN(d.getTime()) ? val : d.toISOString();
+        } catch {
+          return val;
+        }
+      }
+      return String(val);
+    };
+
     if (selectedDataset) {
       const updatedColumns = selectedDataset.columns.map(col => 
         col.key === colKey ? { ...col, type: newType } : col
       );
-      onUpdateDataset({ ...selectedDataset, columns: updatedColumns });
+      const updatedData = selectedDataset.data.map(row => ({
+        ...row,
+        [colKey]: convertValue(row[colKey], newType)
+      }));
+      onUpdateDataset({ ...selectedDataset, columns: updatedColumns, data: updatedData });
     } else if (selectedJoin) {
       const leftDs = datasets.find(d => d.id === selectedJoin.leftDatasetId);
       const rightDs = datasets.find(d => d.id === selectedJoin.rightDatasetId);
@@ -166,14 +241,22 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
         const updatedColumns = leftDs.columns.map(col => 
           col.key === colKey ? { ...col, type: newType } : col
         );
-        onUpdateDataset({ ...leftDs, columns: updatedColumns });
+        const updatedData = leftDs.data.map(row => ({
+          ...row,
+          [colKey]: convertValue(row[colKey], newType)
+        }));
+        onUpdateDataset({ ...leftDs, columns: updatedColumns, data: updatedData });
       } else if (rightDs) {
         const baseKey = colKey.replace('joined_', '');
         if (rightDs.columns.find(c => c.key === baseKey)) {
           const updatedColumns = rightDs.columns.map(col => 
             col.key === baseKey ? { ...col, type: newType } : col
           );
-          onUpdateDataset({ ...rightDs, columns: updatedColumns });
+          const updatedData = rightDs.data.map(row => ({
+            ...row,
+            [baseKey]: convertValue(row[baseKey], newType)
+          }));
+          onUpdateDataset({ ...rightDs, columns: updatedColumns, data: updatedData });
         }
       }
     }
@@ -184,6 +267,35 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
     const updatedColumns = selectedDataset.columns.map(col => 
       col.key === colKey ? { ...col, visible: !col.visible } : col
     );
+    onUpdateDataset({ ...selectedDataset, columns: updatedColumns });
+  };
+
+  const handleAddCalculatedColumn = () => {
+    if (!selectedDataset) return;
+    const newCol: Column = {
+      key: `calc_${Date.now()}`,
+      name: 'New Column',
+      type: 'number',
+      visible: true,
+      formula: '0'
+    };
+    onUpdateDataset({
+      ...selectedDataset,
+      columns: [...selectedDataset.columns, newCol]
+    });
+  };
+
+  const updateColumnFormula = (colKey: string, formula: string) => {
+    if (!selectedDataset) return;
+    const updatedColumns = selectedDataset.columns.map(col => 
+      col.key === colKey ? { ...col, formula } : col
+    );
+    onUpdateDataset({ ...selectedDataset, columns: updatedColumns });
+  };
+
+  const removeColumn = (colKey: string) => {
+    if (!selectedDataset) return;
+    const updatedColumns = selectedDataset.columns.filter(col => col.key !== colKey);
     onUpdateDataset({ ...selectedDataset, columns: updatedColumns });
   };
 
@@ -443,6 +555,16 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
               Visualizations
             </button>
             <button 
+              onClick={() => setActiveTab('schema')}
+              className={cn(
+                "py-4 text-sm font-medium border-b-2 transition-all flex items-center gap-2",
+                activeTab === 'schema' ? "border-stone-900 text-stone-900" : "border-transparent text-stone-400 hover:text-stone-600"
+              )}
+            >
+              <Settings2 size={16} />
+              Schema Manager
+            </button>
+            <button 
               onClick={() => setActiveTab('joins')}
               className={cn(
                 "py-4 text-sm font-medium border-b-2 transition-all flex items-center gap-2",
@@ -469,7 +591,7 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
         </div>
 
         {/* Workspace Area */}
-        <div className={cn("flex-1 p-6 bg-stone-50/50", activeTab !== 'data' && "overflow-y-auto")}>
+        <div className={cn("flex-1 p-6 bg-stone-50/50", (activeTab !== 'data' && activeTab !== 'schema') && "overflow-y-auto")}>
           {activeTab === 'data' ? (
             <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden h-full flex flex-col">
               <div className="ag-theme-alpine w-full flex-1">
@@ -491,6 +613,116 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
                   suppressRowClickSelection={true}
                   enableCellTextSelection={true}
                 />
+              </div>
+            </div>
+          ) : activeTab === 'schema' ? (
+            <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden h-full flex flex-col">
+              <div className="p-6 border-b border-stone-200 bg-stone-50/50 flex items-center justify-between">
+                <div>
+                  <h2 className="text-lg font-bold text-stone-900">Schema Manager</h2>
+                  <p className="text-sm text-stone-500">Manage column names, data types, and custom formulas.</p>
+                </div>
+                <div className="flex items-center gap-4">
+                  <div className="flex items-center gap-2 text-[10px] text-stone-400 bg-stone-100 px-3 py-1.5 rounded-lg border border-stone-200">
+                    <AlertCircle size={12} />
+                    <span>Use <b>[Column Name]</b> to reference other columns. Basic JavaScript math supported.</span>
+                  </div>
+                  {selectedDataset && (
+                    <button 
+                      onClick={handleAddCalculatedColumn}
+                      className="flex items-center gap-2 px-4 py-2 bg-stone-900 text-white rounded-xl text-sm font-medium hover:bg-stone-800 transition-all shadow-sm"
+                    >
+                      <Calculator size={16} />
+                      Add Calculated Column
+                    </button>
+                  )}
+                </div>
+              </div>
+              <div className="flex-1 overflow-y-auto p-6">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {sourceColumns.map(col => (
+                    <div key={col.key} className="p-4 rounded-xl border border-stone-200 bg-white shadow-sm hover:shadow-md transition-all group">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2">
+                          <div className="w-8 h-8 rounded-lg bg-stone-100 flex items-center justify-center text-stone-500">
+                            {col.formula ? <Calculator size={16} className="text-indigo-500" /> : 
+                             col.type === 'number' ? <Hash size={16} /> : 
+                             col.type === 'date' ? <Calendar size={16} /> : 
+                             col.type === 'boolean' ? <CheckCircle2 size={16} /> : 
+                             <TypeIcon size={16} />}
+                          </div>
+                          <input 
+                            type="text"
+                            value={col.name}
+                            onChange={(e) => {
+                              if (!selectedDataset) return;
+                              const updatedColumns = selectedDataset.columns.map(c => 
+                                c.key === col.key ? { ...c, name: e.target.value } : c
+                              );
+                              onUpdateDataset({ ...selectedDataset, columns: updatedColumns });
+                            }}
+                            className="font-bold text-sm text-stone-900 bg-transparent border-none p-0 focus:ring-0 w-32"
+                          />
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {col.formula && (
+                            <button 
+                              onClick={() => removeColumn(col.key)}
+                              className="text-stone-300 hover:text-red-500 transition-colors"
+                            >
+                              <Trash2 size={14} />
+                            </button>
+                          )}
+                          <input 
+                            type="checkbox" 
+                            checked={col.visible} 
+                            onChange={() => toggleColumnVisibility(col.key)}
+                            className="w-4 h-4 rounded border-stone-300 text-stone-900 focus:ring-stone-900"
+                          />
+                        </div>
+                      </div>
+                      
+                      <div className="space-y-3">
+                        <div>
+                          <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider block mb-1">Data Type</label>
+                          <select 
+                            value={col.type}
+                            onChange={(e) => handleTypeChange(col.key, e.target.value as DataType)}
+                            className="w-full text-xs bg-stone-50 border border-stone-200 rounded-lg px-3 py-2 text-stone-700 outline-none focus:ring-1 focus:ring-stone-900 transition-all"
+                          >
+                            <option value="string">String (ABC)</option>
+                            <option value="number">Number (123)</option>
+                            <option value="date">Date (YYYY-MM-DD)</option>
+                            <option value="boolean">Boolean (True/False)</option>
+                          </select>
+                        </div>
+
+                        {col.formula !== undefined && (
+                          <div>
+                            <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider block mb-1 flex items-center justify-between">
+                              Formula
+                              <span className="text-[9px] lowercase font-normal italic">e.g. [Price] * 1.2</span>
+                            </label>
+                            <div className="relative">
+                              <input 
+                                type="text"
+                                value={col.formula}
+                                onChange={(e) => updateColumnFormula(col.key, e.target.value)}
+                                className="w-full text-xs font-mono bg-indigo-50/30 border border-indigo-100 rounded-lg px-3 py-2 text-indigo-700 outline-none focus:ring-1 focus:ring-indigo-500 transition-all"
+                                placeholder="Enter formula..."
+                              />
+                            </div>
+                          </div>
+                        )}
+                        
+                        <div className="pt-2 flex items-center justify-between text-[10px] text-stone-400 italic">
+                          <span>Key: {col.key}</span>
+                          {!col.visible && <span className="text-red-400 font-medium not-italic">Hidden</span>}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
             </div>
           ) : activeTab === 'joins' ? (
