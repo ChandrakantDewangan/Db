@@ -36,10 +36,10 @@ export default function App() {
 
         <div className="flex items-center gap-4">
           <div className="flex bg-stone-100 p-1 rounded-xl">
-            <div className="px-4 py-1.5 bg-white text-stone-900 shadow-sm rounded-lg text-sm font-medium flex items-center gap-2">
+            <button className="px-4 py-1.5 bg-white text-stone-900 shadow-sm rounded-lg text-sm font-medium flex items-center gap-2">
               <Database size={16} />
-              Data Workspace
-            </div>
+              Launch Workspace
+            </button>
           </div>
         </div>
 

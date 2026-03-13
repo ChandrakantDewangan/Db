@@ -16,19 +16,21 @@ export interface Dataset {
   columns: Column[];
 }
 
-export interface Message {
+export interface Join {
   id: string;
-  role: 'user' | 'model';
-  content: string;
-  tableData?: any[];
-  tableName?: string;
+  name: string;
+  leftDatasetId: string;
+  rightDatasetId: string;
+  leftColumn: string;
+  rightColumn: string;
+  type: 'inner' | 'left';
 }
 
 export type ChartType = 'bar' | 'line' | 'scatter' | 'pie' | 'area';
 
 export interface Visualization {
   id: string;
-  datasetId: string;
+  datasetId: string; // Can be a dataset ID or a join ID
   type: ChartType;
   xAxis: string;
   yAxis: string;
