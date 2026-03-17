@@ -3,12 +3,17 @@ import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer, 
   PieChart, Pie, Cell, ScatterChart, Scatter, AreaChart, Area
 } from 'recharts';
+import alasql from 'alasql';
 import { 
   LayoutDashboard, Table as TableIcon, BarChart3, Settings2, Filter, 
   ChevronDown, ChevronUp, Trash2, Edit3, Download, Plus, GitMerge,
   GripVertical, Type as TypeIcon, Hash, Calendar, CheckCircle2, Search,
-  Calculator, AlertCircle
+  Calculator, AlertCircle, Terminal, Play, RotateCcw,
+  Columns as ColumnsIcon, Rows as RowsIcon, Palette, Maximize2, Type,
+  Info, BarChart as BarChartIcon, LineChart as LineChartIcon, PieChart as PieChartIcon, 
+  ScatterChart as ScatterChartIcon, AreaChart as AreaChartIcon
 } from 'lucide-react';
+import { motion, AnimatePresence } from 'framer-motion';
 
 import { AgGridReact } from 'ag-grid-react';
 import { 
@@ -51,9 +56,11 @@ interface AnalyticsViewProps {
 
 export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDataset }: AnalyticsViewProps) {
   const [selectedSourceId, setSelectedSourceId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'data' | 'visualize' | 'joins' | 'schema'>('data');
+  const [activeTab, setActiveTab] = useState<'data' | 'visualize' | 'joins' | 'schema' | 'query'>('data');
   const [visualizations, setVisualizations] = useState<Visualization[]>([]);
   const [joins, setJoins] = useState<Join[]>([]);
+  const [sqlQuery, setSqlQuery] = useState<string>('SELECT * FROM ?');
+  const [queryError, setQueryError] = useState<string | null>(null);
   const gridRef = useRef<AgGridReact>(null);
   
   // Initialize selectedSourceId
@@ -145,6 +152,21 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
     });
   }, [selectedDataset, selectedJoin, datasets]);
 
+  // Apply SQL query if active
+  const finalData = useMemo(() => {
+    if (activeTab !== 'query' || !sqlQuery.trim()) return sourceData;
+    try {
+      setQueryError(null);
+      // alasql expects data as an array of objects
+      // The '?' in the query refers to the first argument after the query string
+      const result = alasql(sqlQuery, [sourceData]);
+      return Array.isArray(result) ? result : [result];
+    } catch (e: any) {
+      setQueryError(e.message || 'Invalid SQL query');
+      return sourceData;
+    }
+  }, [sourceData, sqlQuery, activeTab]);
+
   const sourceColumns = useMemo(() => {
     if (selectedDataset) return selectedDataset.columns;
     if (selectedJoin) {
@@ -165,6 +187,21 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
 
   // AG Grid Column Definitions
   const columnDefs = useMemo(() => {
+    const dataToUse = activeTab === 'query' ? finalData : sourceData;
+    if (activeTab === 'query' && dataToUse.length > 0) {
+      // Auto-generate columns for query results
+      const firstRow = dataToUse[0];
+      return Object.keys(firstRow).map(key => ({
+        field: key,
+        headerName: key.charAt(0).toUpperCase() + key.slice(1).replace(/_/g, ' '),
+        sortable: true,
+        filter: true,
+        resizable: true,
+        flex: 1,
+        minWidth: 120,
+      }));
+    }
+
     return sourceColumns.filter(c => c.visible).map(col => ({
       field: col.key,
       headerName: col.name,
@@ -182,15 +219,93 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
     }));
   }, [sourceColumns, selectedDataset]);
 
-  // Visualization Builder State
-  const [newViz, setNewViz] = useState<Partial<Visualization>>({
-    type: 'bar',
-    xAxis: '',
-    yAxis: '',
-    title: 'New Visualization'
+  // Visualization Builder State (Tableau Style)
+  const [vizShelves, setVizShelves] = useState<{
+    columns: string[];
+    rows: string[];
+    color: string | null;
+    size: string | null;
+    label: string | null;
+  }>({
+    columns: [],
+    rows: [],
+    color: null,
+    size: null,
+    label: null
   });
+  const [vizType, setVizType] = useState<ChartType>('bar');
+  const [vizTitle, setVizTitle] = useState('Untitled Visualization');
 
-  const isVizValid = selectedSourceId && newViz.xAxis && newViz.yAxis;
+  // Categorize columns
+  const dimensions = useMemo(() => sourceColumns.filter(c => c.type !== 'number'), [sourceColumns]);
+  const measures = useMemo(() => sourceColumns.filter(c => c.type === 'number'), [sourceColumns]);
+
+  // Aggregation Logic
+  const aggregatedData = useMemo(() => {
+    if (vizShelves.columns.length === 0 && vizShelves.rows.length === 0) return [];
+
+    try {
+      const dims = vizShelves.columns.filter(k => dimensions.find(d => d.key === k));
+      const meass = vizShelves.rows.filter(k => measures.find(m => m.key === k));
+      
+      if (dims.length === 0 && meass.length > 0) {
+        // Just total aggregation
+        const result: any = { name: 'Total' };
+        meass.forEach(m => {
+          result[m] = sourceData.reduce((acc, row) => acc + (Number(row[m]) || 0), 0);
+        });
+        return [result];
+      }
+
+      if (dims.length > 0) {
+        const groups: Record<string, any> = {};
+        sourceData.forEach(row => {
+          const groupKey = dims.map(d => row[d]).join(' - ');
+          if (!groups[groupKey]) {
+            groups[groupKey] = { name: groupKey };
+            dims.forEach(d => groups[groupKey][d] = row[d]);
+            meass.forEach(m => groups[groupKey][m] = 0);
+          }
+          meass.forEach(m => {
+            groups[groupKey][m] += (Number(row[m]) || 0);
+          });
+        });
+        return Object.values(groups);
+      }
+    } catch (e) {
+      console.error("Aggregation error", e);
+    }
+    return sourceData;
+  }, [sourceData, vizShelves, dimensions, measures]);
+
+  const addToShelf = (shelf: keyof typeof vizShelves, colKey: string) => {
+    setVizShelves(prev => {
+      if (shelf === 'columns' || shelf === 'rows') {
+        if ((prev[shelf] as string[]).includes(colKey)) return prev;
+        return { ...prev, [shelf]: [...(prev[shelf] as string[]), colKey] };
+      }
+      return { ...prev, [shelf]: colKey };
+    });
+  };
+
+  const removeFromShelf = (shelf: keyof typeof vizShelves, colKey?: string) => {
+    setVizShelves(prev => {
+      if (shelf === 'columns' || shelf === 'rows') {
+        return { ...prev, [shelf]: (prev[shelf] as string[]).filter(k => k !== colKey) };
+      }
+      return { ...prev, [shelf]: null };
+    });
+  };
+
+  const clearShelves = () => {
+    setVizShelves({
+      columns: [],
+      rows: [],
+      color: null,
+      size: null,
+      label: null
+    });
+  };
 
   // Global Filter State
   const [filterText, setFilterText] = useState('');
@@ -295,8 +410,22 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
 
   const removeColumn = (colKey: string) => {
     if (!selectedDataset) return;
-    const updatedColumns = selectedDataset.columns.filter(col => col.key !== colKey);
-    onUpdateDataset({ ...selectedDataset, columns: updatedColumns });
+    // If it's a calculated column (has a formula and was added), we might want to remove it.
+    // But wait, the user wants formulas in ANY column. 
+    // Let's define "calculated columns" as those that were added via "Add Calculated Column".
+    // Base columns should never be removed from the schema manager, only hidden.
+    
+    // Actually, let's just keep the current behavior for "Add Calculated Column" columns 
+    // but for base columns, we just clear the formula.
+    
+    const col = selectedDataset.columns.find(c => c.key === colKey);
+    if (col && col.key.startsWith('calc_')) {
+      const updatedColumns = selectedDataset.columns.filter(c => c.key !== colKey);
+      onUpdateDataset({ ...selectedDataset, columns: updatedColumns });
+    } else {
+      // It's a base column, just clear the formula
+      updateColumnFormula(colKey, '');
+    }
   };
 
   const handleAddJoin = () => {
@@ -316,22 +445,33 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
   };
 
   const handleAddVisualization = () => {
-    if (!selectedSourceId || !newViz.xAxis || !newViz.yAxis) return;
+    if (!selectedSourceId) return;
     
     const viz: Visualization = {
       id: Date.now().toString(),
       datasetId: selectedSourceId,
-      type: newViz.type as ChartType,
-      xAxis: newViz.xAxis,
-      yAxis: newViz.yAxis,
-      title: newViz.title || 'Untitled Visualization'
+      type: vizType,
+      title: vizTitle || 'Untitled Visualization',
+      shelves: { ...vizShelves }
     };
 
     setVisualizations(prev => [...prev, viz]);
   };
 
-  const renderChart = (viz: Visualization) => {
-    const data = sourceData;
+  const renderChart = (viz: Visualization, isPreview = false) => {
+    const data = isPreview ? aggregatedData : sourceData; // In a real app, we'd store aggregated data or re-aggregate
+    const shelves = viz.shelves;
+    
+    if (data.length === 0) return (
+      <div className="h-full flex flex-col items-center justify-center text-stone-300 gap-2">
+        <BarChart3 size={48} className="opacity-20" />
+        <p className="text-sm font-medium">Drag dimensions and measures to start</p>
+      </div>
+    );
+
+    const xAxisKey = shelves.columns[0] || 'name';
+    const yAxisKey = shelves.rows[0];
+
     const commonProps = {
       data: data,
       margin: { top: 20, right: 30, left: 20, bottom: 5 }
@@ -340,74 +480,82 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
     switch (viz.type) {
       case 'bar':
         return (
-          <ResponsiveContainer width="100%" height={300}>
+          <ResponsiveContainer width="100%" height="100%">
             <BarChart {...commonProps}>
               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
-              <XAxis dataKey={viz.xAxis} axisLine={false} tickLine={false} tick={{ fontSize: 12 }} />
-              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 12 }} />
-              <Tooltip contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }} />
-              <Legend />
-              <Bar dataKey={viz.yAxis} fill="#141414" radius={[4, 4, 0, 0]} />
+              <XAxis dataKey={xAxisKey} axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#78716c' }} />
+              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10, fill: '#78716c' }} />
+              <Tooltip 
+                contentStyle={{ borderRadius: '12px', border: 'none', boxShadow: '0 10px 15px -3px rgba(0,0,0,0.1)', fontSize: '12px' }}
+                cursor={{ fill: '#f5f5f4' }}
+              />
+              <Legend verticalAlign="top" align="right" iconType="circle" wrapperStyle={{ fontSize: '10px', paddingBottom: '20px' }} />
+              <Bar 
+                dataKey={yAxisKey} 
+                fill={shelves.color ? COLORS[0] : "#2563eb"} 
+                radius={[4, 4, 0, 0]} 
+                barSize={40}
+              />
             </BarChart>
           </ResponsiveContainer>
         );
       case 'line':
         return (
-          <ResponsiveContainer width="100%" height={300}>
+          <ResponsiveContainer width="100%" height="100%">
             <LineChart {...commonProps}>
               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
-              <XAxis dataKey={viz.xAxis} axisLine={false} tickLine={false} />
-              <YAxis axisLine={false} tickLine={false} />
+              <XAxis dataKey={xAxisKey} axisLine={false} tickLine={false} tick={{ fontSize: 10 }} />
+              <YAxis axisLine={false} tickLine={false} tick={{ fontSize: 10 }} />
               <Tooltip />
-              <Legend />
-              <Line type="monotone" dataKey={viz.yAxis} stroke="#141414" strokeWidth={2} dot={{ r: 4 }} activeDot={{ r: 6 }} />
+              <Legend verticalAlign="top" align="right" />
+              <Line type="monotone" dataKey={yAxisKey} stroke="#2563eb" strokeWidth={2} dot={{ r: 3, fill: '#2563eb' }} activeDot={{ r: 5 }} />
             </LineChart>
           </ResponsiveContainer>
         );
       case 'area':
         return (
-          <ResponsiveContainer width="100%" height={300}>
+          <ResponsiveContainer width="100%" height="100%">
             <AreaChart {...commonProps}>
               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#f0f0f0" />
-              <XAxis dataKey={viz.xAxis} />
+              <XAxis dataKey={xAxisKey} />
               <YAxis />
               <Tooltip />
-              <Area type="monotone" dataKey={viz.yAxis} stroke="#141414" fill="#141414" fillOpacity={0.1} />
+              <Area type="monotone" dataKey={yAxisKey} stroke="#2563eb" fill="#3b82f6" fillOpacity={0.1} />
             </AreaChart>
           </ResponsiveContainer>
         );
       case 'pie':
         return (
-          <ResponsiveContainer width="100%" height={300}>
+          <ResponsiveContainer width="100%" height="100%">
             <PieChart>
               <Pie
                 data={data}
                 cx="50%"
                 cy="50%"
-                labelLine={false}
-                outerRadius={80}
-                fill="#8884d8"
-                dataKey={viz.yAxis}
-                nameKey={viz.xAxis}
-                label={({ name, percent }) => `${name} ${(percent * 100).toFixed(0)}%`}
+                innerRadius={60}
+                outerRadius={100}
+                paddingAngle={5}
+                dataKey={yAxisKey}
+                nameKey={xAxisKey}
               >
                 {data.map((entry, index) => (
                   <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
                 ))}
               </Pie>
               <Tooltip />
+              <Legend verticalAlign="bottom" align="center" />
             </PieChart>
           </ResponsiveContainer>
         );
       case 'scatter':
         return (
-          <ResponsiveContainer width="100%" height={300}>
+          <ResponsiveContainer width="100%" height="100%">
             <ScatterChart {...commonProps}>
-              <CartesianGrid strokeDasharray="3 3" />
-              <XAxis type="number" dataKey={viz.xAxis} name={viz.xAxis} />
-              <YAxis type="number" dataKey={viz.yAxis} name={viz.yAxis} />
+              <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+              <XAxis type="number" dataKey={xAxisKey} name={xAxisKey} axisLine={false} tickLine={false} />
+              <YAxis type="number" dataKey={yAxisKey} name={yAxisKey} axisLine={false} tickLine={false} />
               <Tooltip cursor={{ strokeDasharray: '3 3' }} />
-              <Scatter name="Data" data={data} fill="#141414" />
+              <Scatter name="Data" data={data} fill="#2563eb" />
             </ScatterChart>
           </ResponsiveContainer>
         );
@@ -574,6 +722,16 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
               <GitMerge size={16} />
               Join Tables
             </button>
+            <button 
+              onClick={() => setActiveTab('query')}
+              className={cn(
+                "py-4 text-sm font-medium border-b-2 transition-all flex items-center gap-2",
+                activeTab === 'query' ? "border-stone-900 text-stone-900" : "border-transparent text-stone-400 hover:text-stone-600"
+              )}
+            >
+              <Terminal size={16} />
+              SQL Query
+            </button>
           </div>
           
           <div className="flex items-center gap-4">
@@ -591,13 +749,51 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
         </div>
 
         {/* Workspace Area */}
-        <div className={cn("flex-1 p-6 bg-stone-50/50", (activeTab !== 'data' && activeTab !== 'schema') && "overflow-y-auto")}>
-          {activeTab === 'data' ? (
+        <div className={cn("flex-1 p-6 bg-stone-50/50", (activeTab !== 'data' && activeTab !== 'schema' && activeTab !== 'query' && activeTab !== 'visualize') && "overflow-y-auto")}>
+          {(activeTab === 'data' || activeTab === 'query') ? (
             <div className="bg-white rounded-2xl border border-stone-200 shadow-sm overflow-hidden h-full flex flex-col">
+              {activeTab === 'query' && (
+                <div className="p-4 border-b border-stone-200 bg-stone-50">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-2 text-xs font-bold text-stone-400 uppercase tracking-widest">
+                      <Terminal size={14} />
+                      SQL Editor
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <button 
+                        onClick={() => setSqlQuery('SELECT * FROM ?')}
+                        className="text-[10px] flex items-center gap-1 text-stone-500 hover:text-stone-900 transition-colors"
+                      >
+                        <RotateCcw size={10} />
+                        Reset
+                      </button>
+                    </div>
+                  </div>
+                  <div className="relative">
+                    <textarea
+                      value={sqlQuery}
+                      onChange={(e) => setSqlQuery(e.target.value)}
+                      className="w-full h-24 p-3 font-mono text-sm bg-stone-900 text-emerald-400 rounded-xl border-none focus:ring-2 focus:ring-emerald-500/50 resize-none outline-none"
+                      placeholder="SELECT * FROM ?"
+                    />
+                    <div className="absolute bottom-3 right-3 flex items-center gap-2">
+                      {queryError && (
+                        <div className="flex items-center gap-1 text-[10px] text-red-400 bg-red-400/10 px-2 py-1 rounded-md border border-red-400/20">
+                          <AlertCircle size={10} />
+                          {queryError}
+                        </div>
+                      )}
+                      <div className="text-[10px] text-stone-500 italic">
+                        Use <b>?</b> to refer to current dataset
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
               <div className="ag-theme-alpine w-full flex-1">
                 <AgGridReact
                   ref={gridRef}
-                  rowData={sourceData}
+                  rowData={finalData}
                   columnDefs={columnDefs}
                   defaultColDef={{
                     sortable: true,
@@ -665,14 +861,23 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
                           />
                         </div>
                         <div className="flex items-center gap-2">
-                          {col.formula && (
+                          {col.key.startsWith('calc_') ? (
                             <button 
                               onClick={() => removeColumn(col.key)}
                               className="text-stone-300 hover:text-red-500 transition-colors"
+                              title="Remove calculated column"
                             >
                               <Trash2 size={14} />
                             </button>
-                          )}
+                          ) : col.formula ? (
+                            <button 
+                              onClick={() => updateColumnFormula(col.key, '')}
+                              className="text-stone-300 hover:text-amber-500 transition-colors"
+                              title="Clear formula"
+                            >
+                              <RotateCcw size={14} />
+                            </button>
+                          ) : null}
                           <input 
                             type="checkbox" 
                             checked={col.visible} 
@@ -697,23 +902,26 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
                           </select>
                         </div>
 
-                        {col.formula !== undefined && (
-                          <div>
-                            <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider block mb-1 flex items-center justify-between">
-                              Formula
-                              <span className="text-[9px] lowercase font-normal italic">e.g. [Price] * 1.2</span>
-                            </label>
-                            <div className="relative">
-                              <input 
-                                type="text"
-                                value={col.formula}
-                                onChange={(e) => updateColumnFormula(col.key, e.target.value)}
-                                className="w-full text-xs font-mono bg-indigo-50/30 border border-indigo-100 rounded-lg px-3 py-2 text-indigo-700 outline-none focus:ring-1 focus:ring-indigo-500 transition-all"
-                                placeholder="Enter formula..."
-                              />
-                            </div>
+                        <div>
+                          <label className="text-[10px] font-bold text-stone-400 uppercase tracking-wider block mb-1 flex items-center justify-between">
+                            Formula
+                            <span className="text-[9px] lowercase font-normal italic">e.g. [Price] * 1.2</span>
+                          </label>
+                          <div className="relative">
+                            <input 
+                              type="text"
+                              value={col.formula || ''}
+                              onChange={(e) => updateColumnFormula(col.key, e.target.value)}
+                              className={cn(
+                                "w-full text-xs font-mono rounded-lg px-3 py-2 outline-none focus:ring-1 transition-all",
+                                col.formula 
+                                  ? "bg-indigo-50/30 border border-indigo-100 text-indigo-700 focus:ring-indigo-500" 
+                                  : "bg-stone-50 border border-stone-200 text-stone-700 focus:ring-stone-900"
+                              )}
+                              placeholder="Enter formula to override data..."
+                            />
                           </div>
-                        )}
+                        </div>
                         
                         <div className="pt-2 flex items-center justify-between text-[10px] text-stone-400 italic">
                           <span>Key: {col.key}</span>
@@ -722,6 +930,222 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
                       </div>
                     </div>
                   ))}
+                </div>
+              </div>
+            </div>
+          ) : activeTab === 'visualize' ? (
+            <div className="flex h-full gap-6 overflow-hidden">
+              {/* Tableau-style Data Pane */}
+              <div className="w-64 bg-white rounded-2xl border border-stone-200 shadow-sm flex flex-col overflow-hidden">
+                <div className="p-4 border-b border-stone-200 bg-stone-50/50">
+                  <h3 className="text-xs font-bold text-stone-400 uppercase tracking-widest">Data Pane</h3>
+                </div>
+                <div className="flex-1 overflow-y-auto p-4 space-y-6">
+                  {/* Dimensions */}
+                  <div>
+                    <h4 className="text-[10px] font-bold text-stone-400 uppercase tracking-wider mb-3 flex items-center gap-2">
+                      <div className="w-1 h-3 bg-blue-500 rounded-full" />
+                      Dimensions
+                    </h4>
+                    <div className="space-y-1">
+                      {dimensions.map(col => (
+                        <div 
+                          key={col.key}
+                          onClick={() => addToShelf('columns', col.key)}
+                          className="flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-blue-600 hover:bg-blue-50 cursor-pointer transition-colors group"
+                        >
+                          <Type size={12} className="opacity-50" />
+                          <span className="truncate flex-1">{col.name}</span>
+                          <Plus size={12} className="opacity-0 group-hover:opacity-100" />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  {/* Measures */}
+                  <div>
+                    <h4 className="text-[10px] font-bold text-stone-400 uppercase tracking-wider mb-3 flex items-center gap-2">
+                      <div className="w-1 h-3 bg-emerald-500 rounded-full" />
+                      Measures
+                    </h4>
+                    <div className="space-y-1">
+                      {measures.map(col => (
+                        <div 
+                          key={col.key}
+                          onClick={() => addToShelf('rows', col.key)}
+                          className="flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-emerald-600 hover:bg-emerald-50 cursor-pointer transition-colors group"
+                        >
+                          <Hash size={12} className="opacity-50" />
+                          <span className="truncate flex-1">{col.name}</span>
+                          <Plus size={12} className="opacity-0 group-hover:opacity-100" />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Visualization Canvas */}
+              <div className="flex-1 flex flex-col gap-6 overflow-hidden">
+                {/* Shelves Area */}
+                <div className="bg-white rounded-2xl border border-stone-200 shadow-sm p-4 space-y-3">
+                  {/* Columns Shelf */}
+                  <div className="flex items-center gap-4">
+                    <div className="w-20 flex items-center gap-2 text-[10px] font-bold text-stone-400 uppercase tracking-wider">
+                      <ColumnsIcon size={12} />
+                      Columns
+                    </div>
+                    <div className="flex-1 min-h-[32px] bg-stone-50 rounded-lg border border-dashed border-stone-200 p-1 flex flex-wrap gap-2">
+                      {vizShelves.columns.map(key => {
+                        const col = sourceColumns.find(c => c.key === key);
+                        return (
+                          <div key={key} className="flex items-center gap-1.5 px-2 py-1 bg-blue-100 text-blue-700 rounded-md text-[10px] font-medium border border-blue-200">
+                            {col?.name}
+                            <button onClick={() => removeFromShelf('columns', key)}><Trash2 size={10} /></button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Rows Shelf */}
+                  <div className="flex items-center gap-4">
+                    <div className="w-20 flex items-center gap-2 text-[10px] font-bold text-stone-400 uppercase tracking-wider">
+                      <RowsIcon size={12} />
+                      Rows
+                    </div>
+                    <div className="flex-1 min-h-[32px] bg-stone-50 rounded-lg border border-dashed border-stone-200 p-1 flex flex-wrap gap-2">
+                      {vizShelves.rows.map(key => {
+                        const col = sourceColumns.find(c => c.key === key);
+                        return (
+                          <div key={key} className="flex items-center gap-1.5 px-2 py-1 bg-emerald-100 text-emerald-700 rounded-md text-[10px] font-medium border border-emerald-200">
+                            {col?.name}
+                            <button onClick={() => removeFromShelf('rows', key)}><Trash2 size={10} /></button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Marks Shelf */}
+                  <div className="flex items-center gap-4 pt-2 border-t border-stone-100">
+                    <div className="w-20 flex items-center gap-2 text-[10px] font-bold text-stone-400 uppercase tracking-wider">
+                      <Palette size={12} />
+                      Marks
+                    </div>
+                    <div className="flex gap-4">
+                      <div className="flex items-center gap-2 px-3 py-1.5 bg-stone-50 rounded-lg border border-stone-200 text-[10px] text-stone-500">
+                        <Palette size={10} /> Color
+                      </div>
+                      <div className="flex items-center gap-2 px-3 py-1.5 bg-stone-50 rounded-lg border border-stone-200 text-[10px] text-stone-500">
+                        <Maximize2 size={10} /> Size
+                      </div>
+                      <div className="flex items-center gap-2 px-3 py-1.5 bg-stone-50 rounded-lg border border-stone-200 text-[10px] text-stone-500">
+                        <Type size={10} /> Label
+                      </div>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Chart Area */}
+                <div className="flex-1 bg-white rounded-2xl border border-stone-200 shadow-sm p-6 flex flex-col relative overflow-hidden">
+                  <div className="flex items-center justify-between mb-6">
+                    <input 
+                      type="text"
+                      value={vizTitle}
+                      onChange={(e) => setVizTitle(e.target.value)}
+                      className="text-lg font-bold text-stone-900 bg-transparent border-none p-0 focus:ring-0 w-full"
+                      placeholder="Sheet Title"
+                    />
+                    <div className="flex items-center gap-2 bg-stone-100 p-1 rounded-xl border border-stone-200">
+                      <button 
+                        onClick={() => setVizType('bar')}
+                        className={cn("p-2 rounded-lg transition-all", vizType === 'bar' ? "bg-white shadow-sm text-blue-600" : "text-stone-400 hover:text-stone-600")}
+                      >
+                        <BarChartIcon size={16} />
+                      </button>
+                      <button 
+                        onClick={() => setVizType('line')}
+                        className={cn("p-2 rounded-lg transition-all", vizType === 'line' ? "bg-white shadow-sm text-blue-600" : "text-stone-400 hover:text-stone-600")}
+                      >
+                        <LineChartIcon size={16} />
+                      </button>
+                      <button 
+                        onClick={() => setVizType('area')}
+                        className={cn("p-2 rounded-lg transition-all", vizType === 'area' ? "bg-white shadow-sm text-blue-600" : "text-stone-400 hover:text-stone-600")}
+                      >
+                        <AreaChartIcon size={16} />
+                      </button>
+                      <button 
+                        onClick={() => setVizType('pie')}
+                        className={cn("p-2 rounded-lg transition-all", vizType === 'pie' ? "bg-white shadow-sm text-blue-600" : "text-stone-400 hover:text-stone-600")}
+                      >
+                        <PieChartIcon size={16} />
+                      </button>
+                    </div>
+                  </div>
+
+                  <div className="flex-1 min-h-0">
+                    {renderChart({
+                      id: 'preview',
+                      datasetId: selectedSourceId!,
+                      type: vizType,
+                      title: vizTitle,
+                      shelves: vizShelves
+                    }, true)}
+                  </div>
+
+                  <div className="absolute bottom-6 right-6 flex gap-2">
+                    <button 
+                      onClick={clearShelves}
+                      className="px-4 py-2 bg-stone-100 text-stone-600 rounded-xl text-xs font-medium hover:bg-stone-200 transition-all"
+                    >
+                      Clear Sheet
+                    </button>
+                    <button 
+                      onClick={handleAddVisualization}
+                      className="px-4 py-2 bg-blue-600 text-white rounded-xl text-xs font-medium hover:bg-blue-700 transition-all shadow-md flex items-center gap-2"
+                    >
+                      <Plus size={14} />
+                      Save to Dashboard
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {/* Show Me Panel (Right Sidebar) */}
+              <div className="w-48 bg-white rounded-2xl border border-stone-200 shadow-sm p-4 flex flex-col gap-4">
+                <h3 className="text-[10px] font-bold text-stone-400 uppercase tracking-widest flex items-center gap-2">
+                  <Info size={12} />
+                  Show Me
+                </h3>
+                <div className="grid grid-cols-2 gap-2">
+                  {[
+                    { type: 'bar', icon: <BarChartIcon size={20} />, label: 'Bar' },
+                    { type: 'line', icon: <LineChartIcon size={20} />, label: 'Line' },
+                    { type: 'area', icon: <AreaChartIcon size={20} />, label: 'Area' },
+                    { type: 'pie', icon: <PieChartIcon size={20} />, label: 'Pie' },
+                    { type: 'scatter', icon: <ScatterChartIcon size={20} />, label: 'Scatter' }
+                  ].map(item => (
+                    <button
+                      key={item.type}
+                      onClick={() => setVizType(item.type as ChartType)}
+                      className={cn(
+                        "flex flex-col items-center justify-center p-3 rounded-xl border transition-all gap-1",
+                        vizType === item.type 
+                          ? "bg-blue-50 border-blue-200 text-blue-600 shadow-sm" 
+                          : "bg-stone-50 border-stone-100 text-stone-400 hover:border-stone-200"
+                      )}
+                    >
+                      {item.icon}
+                      <span className="text-[8px] font-bold uppercase">{item.label}</span>
+                    </button>
+                  ))}
+                </div>
+                <div className="mt-auto p-3 bg-blue-50 rounded-xl border border-blue-100">
+                  <p className="text-[9px] text-blue-700 leading-relaxed">
+                    <b>Tip:</b> Tableau works best when you drag dimensions to Columns and measures to Rows.
+                  </p>
                 </div>
               </div>
             </div>
@@ -831,78 +1255,26 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
               </div>
             </div>
           ) : (
-            <div className="space-y-8">
-              {/* Viz Builder */}
-              <div className="bg-white p-6 rounded-2xl border border-stone-200 shadow-sm">
-                <h4 className="text-sm font-bold text-stone-900 mb-4 flex items-center gap-2">
-                  <Settings2 size={16} />
-                  Create New Visualization
-                </h4>
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                  <div className="space-y-1.5">
-                    <label className="text-[10px] uppercase font-bold text-stone-400 tracking-wider">Chart Type</label>
-                    <select 
-                      value={newViz.type}
-                      onChange={(e) => setNewViz({...newViz, type: e.target.value as ChartType})}
-                      className="w-full px-3 py-2 bg-stone-50 border border-stone-200 rounded-lg text-sm outline-none focus:ring-1 focus:ring-stone-900"
-                    >
-                      <option value="bar">Bar Chart</option>
-                      <option value="line">Line Chart</option>
-                      <option value="area">Area Chart</option>
-                      <option value="pie">Pie Chart</option>
-                      <option value="scatter">Scatter Plot</option>
-                    </select>
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-[10px] uppercase font-bold text-stone-400 tracking-wider">X-Axis (Dimension)</label>
-                    <select 
-                      value={newViz.xAxis}
-                      onChange={(e) => setNewViz({...newViz, xAxis: e.target.value})}
-                      className="w-full px-3 py-2 bg-stone-50 border border-stone-200 rounded-lg text-sm outline-none focus:ring-1 focus:ring-stone-900"
-                    >
-                      <option value="">Select Column</option>
-                      {sourceColumns.map(col => (
-                        <option key={col.key} value={col.key}>{col.name}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="space-y-1.5">
-                    <label className="text-[10px] uppercase font-bold text-stone-400 tracking-wider">Y-Axis (Measure)</label>
-                    <select 
-                      value={newViz.yAxis}
-                      onChange={(e) => setNewViz({...newViz, yAxis: e.target.value})}
-                      className="w-full px-3 py-2 bg-stone-50 border border-stone-200 rounded-lg text-sm outline-none focus:ring-1 focus:ring-stone-900"
-                    >
-                      <option value="">Select Column</option>
-                      {sourceColumns.filter(c => c.type === 'number').map(col => (
-                        <option key={col.key} value={col.key}>{col.name}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div className="flex items-end">
-                    <button 
-                      onClick={handleAddVisualization}
-                      disabled={!isVizValid}
-                      title={!isVizValid ? "Please select both X and Y axis columns" : "Create visualization"}
-                      className="w-full py-2 bg-stone-900 text-white rounded-lg text-sm font-medium hover:bg-stone-800 disabled:opacity-50 disabled:cursor-not-allowed transition-all flex items-center justify-center gap-2"
-                    >
-                      <Plus size={16} />
-                      Launch Chart
-                    </button>
-                  </div>
-                </div>
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <h2 className="text-lg font-bold text-stone-900 flex items-center gap-2">
+                  <LayoutDashboard size={20} />
+                  Dashboard
+                </h2>
+                <button 
+                  onClick={() => setActiveTab('visualize')}
+                  className="px-4 py-2 bg-stone-900 text-white rounded-xl text-xs font-medium hover:bg-stone-800 transition-all shadow-sm flex items-center gap-2"
+                >
+                  <Plus size={14} />
+                  New Visualization
+                </button>
               </div>
-
-              {/* Viz Grid */}
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 {visualizations.filter(v => v.datasetId === selectedSourceId).map(viz => (
                   <div key={viz.id} className="bg-white p-6 rounded-2xl border border-stone-200 shadow-sm group">
                     <div className="flex items-center justify-between mb-6">
                       <h5 className="text-sm font-bold text-stone-800">{viz.title}</h5>
                       <div className="flex gap-2 opacity-0 group-hover:opacity-100 transition-opacity">
-                        <button className="p-1.5 text-stone-400 hover:text-stone-900 transition-colors">
-                          <Edit3 size={14} />
-                        </button>
                         <button 
                           onClick={() => setVisualizations(prev => prev.filter(v => v.id !== viz.id))}
                           className="p-1.5 text-stone-400 hover:text-red-500 transition-colors"
@@ -920,7 +1292,13 @@ export default function AnalyticsView({ datasets, onUpdateDataset, onRemoveDatas
                 {visualizations.filter(v => v.datasetId === selectedSourceId).length === 0 && (
                   <div className="lg:col-span-2 flex flex-col items-center justify-center py-20 text-stone-400 border-2 border-dashed border-stone-200 rounded-2xl">
                     <BarChart3 size={48} className="mb-4 opacity-20" />
-                    <p className="text-sm">Create your first visualization using the builder above</p>
+                    <p className="text-sm">No visualizations saved to dashboard yet.</p>
+                    <button 
+                      onClick={() => setActiveTab('visualize')}
+                      className="mt-4 text-blue-600 font-medium hover:underline text-sm"
+                    >
+                      Go to Visualization Builder
+                    </button>
                   </div>
                 )}
               </div>

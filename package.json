@@ -19,6 +19,7 @@
     "@vitejs/plugin-react": "^5.0.4",
     "ag-grid-community": "^35.1.0",
     "ag-grid-react": "^35.1.0",
+    "alasql": "^4.17.0",
     "better-sqlite3": "^12.4.1",
     "clsx": "^2.1.1",
     "date-fns": "^4.1.0",

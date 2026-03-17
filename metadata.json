@@ -1,5 +1,5 @@
 {
   "name": "InsightStream Analytics",
-  "description": "A dedicated advanced analytics workspace for data manipulation and custom visualizations with pre-loaded datasets.",
+  "description": "A Tableau-inspired analytics workspace with drag-and-drop visualization, SQL querying, and flexible column formulas for advanced data manipulation.",
   "requestFramePermissions": []
 }

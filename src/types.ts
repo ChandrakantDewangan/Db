@@ -31,9 +31,15 @@ export type ChartType = 'bar' | 'line' | 'scatter' | 'pie' | 'area';
 
 export interface Visualization {
   id: string;
-  datasetId: string; // Can be a dataset ID or a join ID
+  datasetId: string;
   type: ChartType;
-  xAxis: string;
-  yAxis: string;
   title: string;
+  shelves: {
+    columns: string[]; // Dimensions/Measures on X
+    rows: string[];    // Dimensions/Measures on Y
+    color?: string;
+    size?: string;
+    label?: string;
+    tooltip?: string[];
+  };
 }
